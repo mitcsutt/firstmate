@@ -496,6 +496,68 @@ test_create_task_creates_and_parses_ids() {
   pass "fm_backend_cmux_create_task: creates a workspace and parses workspace_id/surface_id from list responses"
 }
 
+test_create_task_retries_lagging_workspace_list() {
+  local dir fb out title
+  dir="$TMP_ROOT/create-task-lag"; mkdir -p "$dir/responses"
+  title=$(cmux_expected_scoped_title fm-lagtask)
+  # 1: pre-create duplicate check -> no match
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  # 2: new-workspace
+  printf 'OK workspace:7' > "$dir/responses/2.out"
+  # 3: first post-create listing lags and omits the new workspace
+  printf '{"workspaces":[]}' > "$dir/responses/3.out"
+  # 4: next listing includes it
+  cmux_workspace_list_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333" "$title"
+  cmux_panes_response "$dir" 5 "eeeeeeee-4444-4444-4444-444444444444"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-lagtask /tmp/proj' "$ROOT" ) \
+    || fail "create_task should tolerate a workspace list that lags the new workspace"
+  [ "$out" = "dddddddd-3333-3333-3333-333333333333 eeeeeeee-4444-4444-4444-444444444444" ] \
+    || fail "create_task should echo the ids resolved after the lagging listing, got '$out'"
+  [ "$(grep -c $'\x1f''workspace'$'\x1f''list' "$dir/log")" = 3 ] \
+    || fail "create_task should have listed workspaces three times (duplicate check, lagging lookup, retry)"
+  pass "fm_backend_cmux_create_task: retries id resolution when the post-create workspace list lags"
+}
+
+test_create_task_closes_unresolvable_workspace_by_uuid() {
+  local dir fb out status
+  dir="$TMP_ROOT/create-task-unresolved"; mkdir -p "$dir/responses"
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf 'OK ffffffff-5555-5555-5555-555555555555' > "$dir/responses/2.out"
+  printf '{"workspaces":[]}' > "$dir/responses/3.out"
+  printf '{"workspaces":[]}' > "$dir/responses/4.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" FM_BACKEND_CMUX_RESOLVE_TRIES=2 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-lost /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the new workspace never appears in the listing"
+  assert_contains "$out" "could not resolve a cmux workspace id" "create_task lost the resolution error"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-workspace'$'\x1f''--workspace'$'\x1f''ffffffff-5555-5555-5555-555555555555' \
+    "create_task did not close the unresolvable workspace named by new-workspace"
+  pass "fm_backend_cmux_create_task: closes the new workspace by its reported UUID when resolution ultimately fails"
+}
+
+test_create_task_leaves_unidentifiable_workspace_and_says_so() {
+  local dir fb out status
+  dir="$TMP_ROOT/create-task-unidentified"; mkdir -p "$dir/responses"
+  printf '{"workspaces":[]}' > "$dir/responses/1.out"
+  printf 'OK workspace:9' > "$dir/responses/2.out"
+  printf '{"workspaces":[]}' > "$dir/responses/3.out"
+  printf '{"workspaces":[]}' > "$dir/responses/4.out"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" FM_BACKEND_CMUX_RESOLVE_TRIES=2 \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_create_task fm-lost2 /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should fail when the new workspace never appears in the listing"
+  assert_contains "$out" "could not resolve a cmux workspace id" "create_task lost the resolution error"
+  assert_contains "$out" "left open" "create_task did not say the unidentifiable workspace was left"
+  if grep -q 'close-workspace' "$dir/log"; then
+    fail "create_task must not close a workspace it could not identify by UUID"
+  fi
+  pass "fm_backend_cmux_create_task: leaves and reports a new workspace it cannot identify by UUID"
+}
+
 # --- target_ready / capture ---------------------------------------------------
 
 test_target_ready_fails_when_target_absent() {
@@ -1130,6 +1192,9 @@ test_ensure_running_fails_fast_on_denied_without_launching
 test_ensure_running_fails_fast_on_unauth_without_launching
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
+test_create_task_retries_lagging_workspace_list
+test_create_task_closes_unresolvable_workspace_by_uuid
+test_create_task_leaves_unidentifiable_workspace_and_says_so
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch

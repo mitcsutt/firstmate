@@ -350,8 +350,15 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 # workspace/surface/pane create all default focus to false) - no
 # focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
 # <surface_id>" on success.
+#
+# `workspace list` is eventually consistent (verified on 0.64.25): the listing
+# taken right after new-workspace can omit the new workspace, so the id lookup
+# retries for a few seconds. If it still cannot resolve, the new workspace is
+# closed only when new-workspace's own output named its UUID; a bare ref is
+# never trusted to identify it, so that orphan is left and reported.
+FM_BACKEND_CMUX_RESOLVE_TRIES="${FM_BACKEND_CMUX_RESOLVE_TRIES:-10}"
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title dup out wsid sfid created i
   title=$(fm_backend_cmux_scoped_title "$label")
   dup=$(fm_backend_cmux_workspace_id_for_label "$title")
   if [ -n "$dup" ]; then
@@ -362,8 +369,21 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
+  for i in $(seq 1 "$FM_BACKEND_CMUX_RESOLVE_TRIES"); do
+    wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
+    [ -n "$wsid" ] && break
+    [ "$i" -lt "$FM_BACKEND_CMUX_RESOLVE_TRIES" ] && sleep 0.3
+  done
+  if [ -z "$wsid" ]; then
+    created=$(printf '%s' "$out" | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+    if [ -n "$created" ]; then
+      fm_backend_cmux_cli close-workspace --workspace "$created" >/dev/null 2>&1 || true
+      echo "error: could not resolve a cmux workspace id for '$title' after creation (closed the new workspace $created)" >&2
+    else
+      echo "error: could not resolve a cmux workspace id for '$title' after creation (new-workspace printed no workspace UUID, so the new workspace was left open: $out)" >&2
+    fi
+    return 1
+  fi
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
   [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
   printf '%s %s' "$wsid" "$sfid"
