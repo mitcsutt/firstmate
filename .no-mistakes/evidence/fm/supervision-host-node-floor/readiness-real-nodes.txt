@@ -1,0 +1,27 @@
+=== node v18.16.0: readiness ===
+rc=1 reason=node v18.16.0 cannot load TypeScript; the supervision session needs Node 22.18.0+ or 23.6.0+
+=== node v18.16.0: direct dispatch call (stderr first lines) ===
+node:internal/errors:490
+    ErrorCaptureStackTrace(err);
+    ^
+
+TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extension ".ts" for /Users/mitcsutt/.no-mistakes/worktrees/7b931e7a3684/01M44XZ8VEVPPRC5NHP4JR38A7/.pi/extensions/lib/fm-branch-dispatch.ts
+
+=== node v22.2.0: readiness ===
+rc=1 reason=node v22.2.0 cannot load TypeScript; the supervision session needs Node 22.18.0+ or 23.6.0+
+=== node v22.2.0: direct dispatch call (stderr first lines) ===
+node:internal/modules/esm/get_format:176
+  throw new ERR_UNKNOWN_FILE_EXTENSION(ext, filepath);
+        ^
+
+TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extension ".ts" for /Users/mitcsutt/.no-mistakes/worktrees/7b931e7a3684/01M44XZ8VEVPPRC5NHP4JR38A7/.pi/extensions/lib/fm-branch-dispatch.ts
+
+=== node v22.22.2: readiness ===
+rc=0 reason=
+=== node v22.22.2: direct dispatch call (stderr first lines) ===
+eligible=0
+status=unsafe
+corrupted=1
+rows=
+tasks=
+

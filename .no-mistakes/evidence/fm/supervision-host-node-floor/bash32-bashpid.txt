@@ -1,0 +1,6 @@
+=== /bin/bash 3.2.57(1)-release set -u, subshell fm_exec_timed 5 1 echo ok, lib=/tmp/fm-timeout-lib.base.sh ===
+/tmp/fm-timeout-lib.base.sh: line 224: BASHPID: unbound variable
+rc=127
+=== /bin/bash 3.2.57(1)-release set -u, subshell fm_exec_timed 5 1 echo ok, lib=bin/fm-timeout-lib.sh ===
+bounded-command-ran
+rc=0

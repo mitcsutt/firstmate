@@ -1,0 +1,8 @@
+=== node v18.16.0 first on PATH: v18.16.0 ===
+MISSING: node (v18.16.0 cannot load TypeScript; requires 22.18.0+ or 23.6.0+; install: brew install node  # or the platform's package manager)
+=== node v22.2.0 first on PATH: v22.2.0 ===
+MISSING: node (v22.2.0 cannot load TypeScript; requires 22.18.0+ or 23.6.0+; install: brew install node  # or the platform's package manager)
+=== node v22.22.2 first on PATH: v22.22.2 ===
+(no node line reported)
+=== node v24.16.0 first on PATH: v24.16.0 ===
+(no node line reported)
