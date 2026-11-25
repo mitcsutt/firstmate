@@ -23,6 +23,8 @@
 #   fm-inbox.sh note [--request-id <id>] [--json] [--] <text>...
 #   fm-inbox.sh note [--request-id <id>] [--json] -   (body from stdin)
 #   fm-inbox.sh announce [--json] <id>
+#   fm-inbox.sh answer --request-id <id> [--home <home>] [--release] [--label <label>] \
+#     [--source <text>] [--json] [--] <task> (<text>... | -)
 #   fm-inbox.sh reply [--json] <id> <text>... | reply [--json] <id> -
 #   fm-inbox.sh receipts [--after <cursor>] [--all-pending] [--all-handled] [--all-replies]
 #   fm-inbox.sh ready
@@ -38,6 +40,18 @@
 # retry are distinguishable. The binding is recorded before announcement, so a
 # crash between save and wake still replays the original note. Without
 # --request-id the historical one-note-per-call behaviour is unchanged.
+# `answer` is the one call a surface makes when the captain answers a held task
+# there: it feeds the answer to bin/fm-captain-hold.sh's keyed-answer intake
+# (so every intake guard applies and a refusal, such as a release while away,
+# is reported and queues nothing) and then queues a `note` carrying the same
+# --request-id, so firstmate wakes and acts on it. --request-id is required and
+# must be unique per answer: a repeat closes nothing twice (the intake replays
+# the recorded answer) and the note replays, so a retry after a crash between
+# the two steps, or a double click, is safe. --home names the home that owns the
+# task (a card's `home` in state/captain-view.json); without it the calling
+# home is used. --release lifts the hold so held work resumes instead of closing
+# the task. `--json` and the exit codes follow `note`; the intake's own lines go
+# to stderr under --json.
 # `announce` repairs the wake for an already-saved note without creating another.
 # A note already acknowledged (in handled/) gets no wake from `announce` or a
 # request-id replay; both report it as acknowledged and exit 0.
@@ -495,6 +509,65 @@ cmd_note() {
   else
     body="$*"
   fi
+  queue_note text "$body" "" "$request_id" "$json"
+}
+
+cmd_answer() {
+  local usage_text='usage: fm-inbox.sh answer --request-id <id> [--home <home>] [--release] [--label <label>] [--source <text>] [--json] [--] <task> (<text>... | -)'
+  local request_id='' home='' mode='' label='' source='a captain answer from a surface' json=0
+  local task answer out rc=0 body
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      --release) mode=release; shift ;;
+      --request-id)
+        [ "$#" -ge 2 ] || die "$usage_text"
+        request_id=$2
+        valid_request_id "$request_id" \
+          || die "invalid request id (use 1-128 characters: A-Za-z0-9._:-)"
+        shift 2
+        ;;
+      --home) [ "$#" -ge 2 ] || die "$usage_text"; home=$2; shift 2 ;;
+      --label) [ "$#" -ge 2 ] || die "$usage_text"; label=$2; shift 2 ;;
+      --source) [ "$#" -ge 2 ] || die "$usage_text"; source=$2; shift 2 ;;
+      --) shift; break ;;
+      -*) die "$usage_text" ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$request_id" ] || die "answer requires --request-id so a retry is idempotent"
+  [ "$#" -ge 2 ] || die "$usage_text"
+  task=$1
+  shift
+  case "$task" in
+    ''|*[!A-Za-z0-9._-]*) die "task must be a privacy-safe slug: $task" ;;
+  esac
+  if [ "$1" = "-" ]; then
+    [ "$#" -eq 1 ] || die "$usage_text"
+    answer=$(cat; printf .)
+    answer=${answer%.}
+  else
+    answer="$*"
+  fi
+  answer=$(printf '%s' "$answer" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  [ -n "${answer//[[:space:]]/}" ] || die "refusing to record an empty answer"
+  label=$(printf '%s' "$label" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
+  if [ -n "$home" ]; then
+    [ -d "$home/data" ] || die "--home is not a firstmate home: $home"
+    out=$(printf '%s\t%s\t%s\t%s\n' "$task" "$answer" "$label" "$mode" \
+      | env -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_CONFIG_OVERRIDE FM_HOME="$home" \
+        "$SELF_DIR/fm-captain-hold.sh" answers --source "$source" 2>&1) || rc=$?
+  else
+    out=$(printf '%s\t%s\t%s\t%s\n' "$task" "$answer" "$label" "$mode" \
+      | "$SELF_DIR/fm-captain-hold.sh" answers --source "$source" 2>&1) || rc=$?
+  fi
+  if [ "$json" -eq 1 ] || [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$out" >&2
+  else
+    printf '%s\n' "$out"
+  fi
+  [ "$rc" -eq 0 ] || die "the answer for $task was not accepted; nothing was queued for firstmate"
+  body="Captain answered held task $task from $source (request $request_id)${home:+ in home $home}${mode:+, released}: $answer"
   queue_note text "$body" "" "$request_id" "$json"
 }
 
@@ -1138,6 +1211,7 @@ cmd_drain() {
 case "${1:-}" in
   note)     shift; cmd_note "$@" ;;
   announce) shift; cmd_announce "$@" ;;
+  answer)   shift; cmd_answer "$@" ;;
   reply)    shift; cmd_reply "$@" ;;
   receipts) shift; cmd_receipts "$@" ;;
   ready)    shift; cmd_ready "$@" ;;

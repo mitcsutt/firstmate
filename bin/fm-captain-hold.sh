@@ -21,7 +21,9 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--waiting-on <who> | --needs-you] [--option <label>]... [--recommend <n>] [--trail <line>]...
+#   fm-captain-hold.sh holds
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh pr-policy <task-id> <PR-url> <merged|closed|terminal> <close|release>
 #   fm-captain-hold.sh settle-pr <task-id> <PR-url>
@@ -58,6 +60,27 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+#
+# HOLD STATE AND CARD DETAIL. Every hold has one state: `needs-you` (the
+# default), `waiting-on` (an external dependency; `--waiting-on <who>` names
+# the owner and `--needs-you` clears it on a re-hold), or `dated` (an `--until`
+# date still in the future, unless the hold is waiting-on). `--option` (repeatable,
+# one line each), `--recommend <n>` (1-based index of the recommended option) and
+# `--trail <line>` (repeatable, "where this was" context) are the structured
+# card detail. All of it lives in one sidecar, data/<task-id>/captain-hold.json
+# (schema fm-captain-hold-meta.v1: task, waiting_on, options[{label,recommended}],
+# trail[]), written atomically. Repeating an active hold without these flags
+# keeps the sidecar and any flag given replaces just its own field; a hold that
+# starts a new lifecycle drops a stale sidecar. The sidecar adds no state to the
+# backlog row, so every existing hold, bucket, and reader is unchanged.
+#
+# `holds` is the read-only listing of this home's open captain holds as one JSON
+# array (id, title, reason, until, asked, origin, state, waiting_on, options,
+# trail). bin/fm-captain-view.sh builds state/captain-view.json from it. Every
+# mutating subcommand below (hold, answer, answers, pr-policy, settle-pr,
+# reconcile) refreshes that projection from this script's own exit path, so no
+# caller can skip it; a failed refresh is reported as `actionable:` on stderr and
+# never changes the mutation's own result.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -302,6 +325,7 @@ CAPTAIN_META_LOCK=
 CAPTAIN_META_LOCK_HELD=0
 CAPTAIN_CONTROL_LOCK=
 CAPTAIN_CONTROL_LOCK_HELD=0
+CAPTAIN_VIEW_REFRESH=0
 captain_hold_cleanup() {
   if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CAPTAIN_META_LOCK" || true
@@ -312,6 +336,12 @@ captain_hold_cleanup() {
     CAPTAIN_CONTROL_LOCK_HELD=0
   fi
   fm_afk_contract_lock_release || true
+  if [ "$CAPTAIN_VIEW_REFRESH" = 1 ]; then
+    CAPTAIN_VIEW_REFRESH=0
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-captain-view.sh" --quiet >/dev/null 2>&1 \
+      || printf 'actionable: state/captain-view.json was not refreshed; run bin/fm-captain-view.sh\n' >&2
+  fi
 }
 trap captain_hold_cleanup EXIT
 
@@ -1116,9 +1146,99 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   printf '%s %s %s\n' "$id" "$how" "$origin_state"
 }
 
+hold_meta_path() { printf '%s/%s/captain-hold.json\n' "$DATA" "$1"; }
+
+write_hold_meta() {  # <id> <preserve-0-or-1> <waiting-on> <needs-you-0-or-1> <options-nl> <recommend> <trail-nl>
+  local id=$1 preserve=$2 waiting=$3 needs=$4 options=$5 recommend=$6 trail=$7 path tmp old='{}'
+  path=$(hold_meta_path "$id")
+  if [ -z "$waiting" ] && [ "$needs" = 0 ] && [ -z "$options" ] && [ -z "$trail" ]; then
+    [ "$preserve" = 1 ] || rm -f -- "$path"
+    return 0
+  fi
+  if [ "$preserve" = 1 ] && [ -f "$path" ]; then
+    old=$(cat "$path" 2>/dev/null) || old='{}'
+    printf '%s' "$old" | jq -e . >/dev/null 2>&1 || old='{}'
+  fi
+  mkdir -p -- "$DATA/$id" || fail "could not create $DATA/$id"
+  tmp=$(mktemp "$DATA/$id/.captain-hold.XXXXXX") || fail "could not stage the hold state for $id"
+  printf '%s' "$old" | jq --arg task "$id" --arg waiting "$waiting" --argjson needs "$needs" \
+    --arg options "$options" --arg recommend "${recommend:-0}" --arg trail "$trail" '
+    def lines: split("\n") | map(select(. != ""));
+    {schema:"fm-captain-hold-meta.v1", task:$task,
+     waiting_on:(if $waiting != "" then $waiting elif $needs == 1 then null else (.waiting_on // null) end),
+     options:(if $options != "" then ($options | lines | to_entries
+                | map({label:.value, recommended:((.key + 1) == ($recommend | tonumber))}))
+              else (.options // []) end),
+     trail:(if $trail != "" then ($trail | lines) else (.trail // []) end)}' > "$tmp" \
+    || { rm -f -- "$tmp"; fail "could not record the hold state for $id"; }
+  mv -f -- "$tmp" "$path" || { rm -f -- "$tmp"; fail "could not publish the hold state for $id"; }
+}
+
+captain_hold_ids() {
+  local data state
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  for state in queued in_flight; do
+    fm_backlog_row_list "$data" --state "$state" --fields hold_kind --limit 1000 2>/dev/null | awk -F, '
+      /^  [A-Za-z0-9._-]+,/ {
+        id = $1
+        sub(/^ +/, "", id)
+        if ($NF == "captain") print id
+      }
+    '
+  done
+}
+
+command_holds() {
+  local ids id show body asked origin reason until title sidecar today meta='null' rows=''
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  command -v jq >/dev/null 2>&1 || fail "jq is required to list holds"
+  ids=$(captain_hold_ids) || fail "could not list this home's backlog"
+  today=${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+  today=${today%%T*}
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    task_show "$id" || continue
+    show=$TASK_SHOW_OUTPUT
+    [ "$(show_field "$show" state)" != "done" ] || continue
+    [ "$(show_field_value "$show" hold_kind)" = captain ] || continue
+    show=$(printf '%s\n' "$show" | fm_hold_reason_decode_stream toon)
+    body=$(decode_shown_value "$(show_field "$show" body)")
+    title=$(show_field_value "$show" title)
+    reason=$(show_field_value "$show" hold_reason)
+    until=$(show_field_value "$show" hold_until)
+    asked=$(body_hold_set_timestamp "$body")
+    origin=$(body_hold_origin "$body")
+    sidecar=$(hold_meta_path "$id")
+    meta=null
+    if [ -f "$sidecar" ] && [ ! -L "$sidecar" ]; then
+      meta=$(jq -c 'select(.schema == "fm-captain-hold-meta.v1" and .task == $id)' --arg id "$id" "$sidecar" 2>/dev/null) || meta=null
+      [ -n "$meta" ] || meta=null
+    fi
+    rows="$rows$(jq -nc --arg id "$id" --arg title "$title" --arg reason "$reason" --arg until "$until" \
+      --arg asked "$asked" --arg origin "$origin" --arg body "$body" --arg today "$today" --argjson meta "$meta" '
+      ($meta // {}) as $m
+      | {id:$id, title:$title, reason:$reason,
+         until:(if $until == "" then null else $until end),
+         asked:(if $asked == "" then null else $asked end),
+         origin:(if $origin == "" then null else $origin end),
+         waiting_on:($m.waiting_on // null),
+         state:(if ($m.waiting_on // null) != null then "waiting-on"
+                elif $until != "" and $until > $today then "dated"
+                else "needs-you" end),
+         options:($m.options // []),
+         trail:(($m.trail // [])
+                + [$body | split("\n")[] | select(startswith("Captain hold reconciled: "))
+                   | sub("^Captain hold reconciled: "; "reconciled: ")])}')"$'\n'
+  done <<EOF
+$ids
+EOF
+  printf '%s' "$rows" | jq -s '.'
+}
+
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
+  local waiting_on='' needs_you=0 options='' option_count=0 recommend='' trail='' line
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1128,12 +1248,42 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --waiting-on) shift; waiting_on=${1:-}; [ -n "$waiting_on" ] || fail "--waiting-on needs a name" ;;
+      --needs-you) needs_you=1 ;;
+      --option)
+        shift
+        line=${1:-}
+        validate_one_line option "$line"
+        options="${options:+$options$'\n'}$line"
+        option_count=$((option_count + 1))
+        ;;
+      --recommend) shift; recommend=${1:-} ;;
+      --trail)
+        shift
+        line=${1:-}
+        validate_one_line trail "$line"
+        trail="${trail:+$trail$'\n'}$line"
+        ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
   [ -n "$reason" ] || fail "reason must not be empty"
+  [ -z "$waiting_on" ] || [ "$needs_you" = 0 ] || fail "--waiting-on and --needs-you are mutually exclusive"
+  if [ -n "$waiting_on" ]; then
+    validate_one_line waiting-on "$waiting_on"
+  fi
+  if [ -n "$recommend" ]; then
+    case "$recommend" in
+      ''|*[!0-9]*|0) fail "--recommend must be a 1-based option number: $recommend" ;;
+    esac
+    [ "$recommend" -le "$option_count" ] || fail "--recommend $recommend names no --option (given: $option_count)"
+  fi
+  if { [ -n "$waiting_on" ] || [ "$needs_you" = 1 ] || [ -n "$options" ] || [ -n "$trail" ]; } \
+    && ! command -v jq >/dev/null 2>&1; then
+    fail "jq is required to record hold state or card detail"
+  fi
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
   if [ -n "$origin" ]; then
@@ -1151,6 +1301,7 @@ command_hold() {
     *) fail "FM_CAPTAIN_HOLD_NOW must be a UTC YYYY-MM-DDTHH:MM:SSZ timestamp" ;;
   esac
   acquire_task_control_lock "$id"
+  CAPTAIN_VIEW_REFRESH=1
   require_tasks_axi
   if task_show "$id"; then
     show=$TASK_SHOW_OUTPUT
@@ -1224,6 +1375,7 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
+  write_hold_meta "$id" "$preserve_hold_set" "$waiting_on" "$needs_you" "$options" "$recommend" "$trail"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason" "$until"
   if [ -n "$origin" ]; then
     write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
@@ -2417,7 +2569,8 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
 
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
-  answer) shift; command_answer "$@" ;;
+  holds) shift; command_holds "$@" ;;
+  answer) shift; CAPTAIN_VIEW_REFRESH=1; command_answer "$@" ;;
   answers) shift; command_answers "$@" ;;
   reconcile-requests) shift; command_reconcile_requests "$@" ;;
   bind) shift; command_bind "$@" ;;
@@ -2427,9 +2580,13 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
   diverged) shift; command_diverged "$@" ;;
-  reconcile) shift; command_reconcile "$@" ;;
-  pr-policy) shift; command_pr_policy "$@" ;;
-  settle-pr) shift; command_settle_pr "$@" ;;
+  reconcile)
+    shift
+    case "${1:-}" in close|note) CAPTAIN_VIEW_REFRESH=1 ;; esac
+    command_reconcile "$@"
+    ;;
+  pr-policy) shift; CAPTAIN_VIEW_REFRESH=1; command_pr_policy "$@" ;;
+  settle-pr) shift; CAPTAIN_VIEW_REFRESH=1; command_settle_pr "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

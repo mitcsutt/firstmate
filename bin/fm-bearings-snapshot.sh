@@ -150,13 +150,16 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
-  decisions_open{id,key,verb,summary,question,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,summary,question,owner,state,waiting_on}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
 Decision presentation uses question, the full title and hold reason; summary
   remains a bounded overview and must not substitute for the question/options.
+Every decisions_open row carries state: needs-you, waiting-on (an external
+  dependency, named by waiting_on), or dated (a future --until), recorded by
+  bin/fm-captain-hold.sh. A hold with no recorded state is needs-you.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -532,7 +535,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
             summary:hold_summary(.title; .hold_reason),
-            question:(.title + ": " + .hold_reason),owner:"(main)"} ]
+            question:(.title + ": " + .hold_reason),owner:"(main)",
+            state:(.hold_state // "needs-you"),waiting_on:(.waiting_on // null)} ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
               | select(.source == "backlog" and .verb == "captain-hold")
@@ -540,7 +544,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
               | {id:($m.id + "/" + .id),key,verb,
                  summary:hold_summary((.summary // .id);
                                       (.reason // "captain decision pending")),
-                 question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id} ]
+                 question:(.question // ((.summary // .id) + ": " + (.reason // "captain decision pending"))),owner:$m.id,
+                 state:(.state // "needs-you"),waiting_on:(.waiting_on // null)} ]
             + [ $m.queued[]?
                 | select($all_decisions == 1 and .hold_kind == "captain")
                 | select(.id as $id
@@ -551,7 +556,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                 | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
                    summary:hold_summary((.title // .id);
                                         (.hold_reason // "captain decision pending")),
-                   question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id} ])[] ]) as $decisions_all
+                   question:(.question // ((.title // .id) + ": " + (.hold_reason // "captain decision pending"))),owner:$m.id,
+                   state:(.hold_state // "needs-you"),waiting_on:(.waiting_on // null)} ])[] ]) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]

@@ -34,6 +34,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 | Subcommand | What it does | Details |
 | --- | --- | --- |
 | `hold` | Creates or reuses a task and holds it for the captain. | [Creating a hold](#creating-a-hold-hold) |
+| `holds` | Read-only JSON listing of this home's open holds with their state and card detail. | [Hold state and the captain view](#hold-state-and-the-captain-view) |
 | `answer` | Records the captain's exact words and resolves the call. | [Answering a call](#answering-a-call-answer) |
 | `complete` | Records the reviewed captain-held task ids in the originating task's metadata. | [Recording a reviewed inventory](#recording-a-reviewed-inventory-complete) |
 | `verify` | Read-only check that scout teardown runs before removing source state. | [Checking before scout teardown](#checking-before-scout-teardown-verify) |
@@ -147,6 +148,20 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
+
+### Hold state and the captain view
+
+Every hold has one state: `needs-you`, `waiting-on` (an external dependency named by `--waiting-on <who>`), or `dated` (a future `--until`).
+A hold recorded with no state is `needs-you`, so existing holds and the hold buckets are unchanged.
+The state and the card detail (`--option`, `--recommend`, `--trail`) live in one sidecar, `data/<task-id>/captain-hold.json`, never in the backlog row.
+`bin/fm-captain-hold.sh --help` owns the flags and the sidecar schema.
+Fleet and bearings snapshots carry `state` and `waiting_on` on every decision row.
+
+`bin/fm-captain-hold.sh` rewrites `state/captain-view.json` from its own exit path after every hold, answer, settle, and reconcile.
+`bin/fm-captain-view.sh` owns the projection's schema and the manual rebuild.
+The projection covers this home and the local secondmate homes registered in `data/secondmates.md`, read-only, and a change made inside a secondmate home also refreshes its local parent's projection.
+A render-only surface draws the file and answers through `bin/fm-inbox.sh answer`, which feeds the keyed-answer intake and wakes firstmate in one idempotent step.
+The surface interprets nothing, so the buckets and states cannot drift from firstmate's own.
 
 ## Cleanup never closes a captain call
 
@@ -669,13 +684,14 @@ That suite drives its Lavish session through a protocol-shaped stub.
 It separates a resolution from the durable-transfer close and from a still-open key.
 It reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 
-Projection and decision-text rendering regressions live in three suites:
+Projection and decision-text rendering regressions live in four suites:
 
 | Suite | What it covers |
 | --- | --- |
 | `tests/fm-fleet-snapshot-view.test.sh` | The total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, and title stripping. |
 | `tests/fm-bearings-snapshot.test.sh` | Default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, scout-report precedence over competing pull-request links, and full local and secondmate question transport with Unicode, report pointers, and legacy optional-field fallbacks. |
 | `tests/fm-bearings-board-render.test.sh` | Complete snapshot question and option text reaching the rendered decision card, including Unicode. |
+| `tests/fm-captain-view.test.sh` | Hold state and card detail, the projection refreshed by every mutation, secondmate homes read-only and parent refresh, the `decisions_open` state fields, and the idempotent `fm-inbox.sh answer`. |
 
 ### Refreshing this record
 

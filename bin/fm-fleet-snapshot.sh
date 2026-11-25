@@ -1031,6 +1031,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
              question:(.title + ": " + .hold_reason),
             hold_until:(.hold_until // null),
             hold_bucket:(.hold_bucket // null),
+            state:(.hold_state // null),
+            waiting_on:(.waiting_on // null),
             hold_age_days:(.hold_age_days // null),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(landed_record)
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
@@ -1145,6 +1147,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
           hold_bucket:(.hold_bucket // null),
+          hold_state:(.hold_state // null),
+          waiting_on:((.waiting_on // null) | if . == null then null else trunc(80) end),
           hold_age_days:(.hold_age_days // null),
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
@@ -1997,7 +2001,24 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
-BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+hold_state_json() {  # stdin: backlog JSON; adds waiting_on and hold_state to each captain hold
+  local waits
+  waits=$(jq -cn '[inputs | select(.schema == "fm-captain-hold-meta.v1")
+                   | {key:.task, value:(.waiting_on // null)}] | from_entries' \
+    "$DATA"/*/captain-hold.json 2>/dev/null) || waits='{}'
+  [ -n "$waits" ] || waits='{}'
+  jq --argjson waits "$waits" '
+    .records |= map(
+      if .structured then
+        . + {waiting_on:($waits[.id] // null),
+             hold_state:(if .hold_kind != "captain" or .hold_reason == null or .state == "done" then null
+                         elif ($waits[.id] // null) != null then "waiting-on"
+                         elif .hold_bucket == "dated" then "dated"
+                         else "needs-you" end)}
+      else . end)'
+}
+
+BACKLOG_JSON=$(backlog_json | hold_state_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 contribution_tasks_json() {
   local meta id merge_authority
   for meta in "$STATE"/*.meta; do
