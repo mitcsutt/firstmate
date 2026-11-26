@@ -790,13 +790,77 @@ _fm_decision_slug_ok() {  # <slug>
     *) return 0 ;;
   esac
 }
+# --- optional outcome tags on done/failed lines --------------------------------
+# A done or failed line may open its note with "[pr=<url>]" and/or
+# "[report=<path>]" (either order, each at most once, after any "[key=...]"):
+#   done [at=1788576000]: [pr=https://github.com/o/r/pull/7] [report=data/t/report.md] shipped
+# They sit in the note, never before the colon, because a URL carries colons and
+# every head parser ends the head at the first one. status_line_note strips them,
+# so note consumers and exact-shape readers such as `PR <url> checks green` see the
+# note as if the tags were absent; status_line_outcome_tag reads them. A tag with
+# a malformed value (a pr that is not http(s), whitespace, a stray bracket), a
+# repeat, or any tag on another verb is plain note text and is never read as one.
+_fm_outcome_tag_value_ok() {  # <name> <value>
+  case "$2" in ''|*[[:space:]]*|*\]*|*\[*) return 1 ;; esac
+  case "$1" in
+    pr) case "$2" in https://?*|http://?*) return 0 ;; esac; return 1 ;;
+  esac
+  return 0
+}
+_fm_outcome_tags() {  # <note> <pr-out> <report-out> <rest-out>
+  local __fm_ot_rest=$1 __fm_ot_pr='' __fm_ot_report='' __fm_ot_tok __fm_ot_name __fm_ot_val
+  while :; do
+    case "$__fm_ot_rest" in
+      \[pr=*\]*|\[report=*\]*) ;;
+      *) break ;;
+    esac
+    __fm_ot_tok=${__fm_ot_rest%%\]*}
+    __fm_ot_name=${__fm_ot_tok#\[}
+    __fm_ot_name=${__fm_ot_name%%=*}
+    __fm_ot_val=${__fm_ot_tok#*=}
+    _fm_outcome_tag_value_ok "$__fm_ot_name" "$__fm_ot_val" || break
+    case "$__fm_ot_name" in
+      pr) [ -z "$__fm_ot_pr" ] || break; __fm_ot_pr=$__fm_ot_val ;;
+      *) [ -z "$__fm_ot_report" ] || break; __fm_ot_report=$__fm_ot_val ;;
+    esac
+    __fm_ot_rest=${__fm_ot_rest#"$__fm_ot_tok]"}
+    __fm_ot_rest=${__fm_ot_rest#"${__fm_ot_rest%%[![:space:]]*}"}
+  done
+  printf -v "$2" '%s' "$__fm_ot_pr"
+  printf -v "$3" '%s' "$__fm_ot_report"
+  printf -v "$4" '%s' "$__fm_ot_rest"
+}
+status_line_outcome_tag() {  # <status-line> <pr|report> [<out-var>] -> value; 1 when absent
+  local __fm_otr_verb __fm_otr_note __fm_otr_pr __fm_otr_report __fm_otr_rest __fm_otr_value
+  case "$2" in pr|report) ;; *) return 2 ;; esac
+  status_line_verb "$1" __fm_otr_verb
+  case "$__fm_otr_verb" in done|failed) ;; *) return 1 ;; esac
+  _fm_status_line_note_raw "$1" __fm_otr_note
+  _fm_outcome_tags "$__fm_otr_note" __fm_otr_pr __fm_otr_report __fm_otr_rest
+  if [ "$2" = pr ]; then __fm_otr_value=$__fm_otr_pr; else __fm_otr_value=$__fm_otr_report; fi
+  [ -n "$__fm_otr_value" ] || return 1
+  if [ "$#" -gt 2 ]; then printf -v "$3" '%s' "$__fm_otr_value"; else printf '%s' "$__fm_otr_value"; fi
+}
 # Both readers below locate the head/note separator on an unstamped copy, so a
 # worker-written stamp cannot move it: a readable time like [at=10:30] carries
 # colons that would otherwise end the head mid-tag and hand the caller a note
 # and a key sliced out of the timestamp. The line's own bytes are never altered.
 # Like status_line_verb, an <out-var> receives the note without forking a
 # command substitution, and must not be named like one of these locals.
-status_line_note() {  # <status-line> [<out-var>] -> text after the first colon, trimmed
+status_line_note() {  # <status-line> [<out-var>] -> text after the first colon, trimmed, outcome tags removed
+  local __fm_sn_text __fm_sn_verb __fm_sn_pr __fm_sn_report
+  _fm_status_line_note_raw "$1" __fm_sn_text
+  case "$__fm_sn_text" in
+    \[pr=*|\[report=*)
+      status_line_verb "$1" __fm_sn_verb
+      case "$__fm_sn_verb" in
+        done|failed) _fm_outcome_tags "$__fm_sn_text" __fm_sn_pr __fm_sn_report __fm_sn_text ;;
+      esac
+      ;;
+  esac
+  if [ "$#" -gt 1 ]; then printf -v "$2" '%s' "$__fm_sn_text"; else printf '%s' "$__fm_sn_text"; fi
+}
+_fm_status_line_note_raw() {  # <status-line> <out-var> -> text after the first colon, trimmed
   local __fm_note_text __fm_note_key __fm_note_unstamped
   _fm_status_unstamped "$1" __fm_note_unstamped
   case "$__fm_note_unstamped" in
@@ -815,7 +879,7 @@ status_line_note() {  # <status-line> [<out-var>] -> text after the first colon,
       ;;
     *) __fm_note_text=$__fm_note_unstamped ;;
   esac
-  if [ "$#" -gt 1 ]; then printf -v "$2" '%s' "$__fm_note_text"; else printf '%s' "$__fm_note_text"; fi
+  printf -v "$2" '%s' "$__fm_note_text"
 }
 _fm_decision_key() {  # <status-line> [<keyless>] [<out-var>] -> key slug, or <keyless> (default "default") when no token
   local __fm_key_slug __fm_key_unstamped

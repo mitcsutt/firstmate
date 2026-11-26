@@ -446,7 +446,7 @@ pr_for_task() { # <meta> <terminal-line> <status-file>
   if [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-register-scan" ]; then
     if [ -z "$value" ] && [ -n "$terminal" ]; then
       value=$(printf '%s\n' "$terminal" \
-        | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
+        | sed -nE 's#^done( \[at=[^]]*\])?: (\[(pr|report)=[^] ]*\] )*PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$#\4#p' \
         | head -1 || true)
     fi
     clean_field "$value"

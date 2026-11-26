@@ -595,7 +595,7 @@ fm_pr_check_ready_line_waits_for_green() {
   case "$PROVIDER:$PR_MODE" in
     gerrit:*|*:direct-PR|*:local-only) return 1 ;;
   esac
-  note=$(grep -E '^done( \[at=[^]]*\])?: ' "$STATE/$ID.status" 2>/dev/null | tail -1 | sed -E 's/^done( \[at=[^]]*\])?: //' || true)
+  note=$(grep -E '^done( \[at=[^]]*\])?: ' "$STATE/$ID.status" 2>/dev/null | tail -1 | sed -E 's/^done( \[at=[^]]*\])?: //; s/^(\[(pr|report)=[^] ]*\] )+//' || true)
   fm_dod_note_reports_ci_ready "$note" || return 0
   case " $note " in
     *"$URL"[^[:alnum:]]*) return 1 ;;
