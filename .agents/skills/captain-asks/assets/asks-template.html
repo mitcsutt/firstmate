@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-lavish-annotate="off">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waiting on you</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style>
+  .card, .card * { min-width: 0; overflow-wrap: anywhere; }
+  dt { font-weight: 600; margin-top: .5rem; }
+  dd { opacity: .85; }
+  .card.is-queued .askbody { display: none; }
+  .card .queuedbox { display: none; }
+  .card.is-queued .queuedbox { display: block; }
+  .card.is-queued { opacity: .75; }
+</style>
+</head>
+<!-- next-id: 1. Rules: ids never reused or renumbered; new asks append at the bottom; answered asks move to "Firstmate has these". -->
+<body class="bg-base-200 text-base-content p-4 md:p-8">
+<main class="max-w-3xl mx-auto space-y-4">
+  <header class="space-y-2">
+    <h1 class="text-2xl font-bold">Waiting on you</h1>
+    <ul class="text-sm opacity-80 list-disc ml-5">
+      <li>Questions are numbered and stay in that order. New ones are only ever added at the <b>bottom</b>.</li>
+      <li>Pick an option, or just write a comment, then press <b>Queue answer</b>, then <b>Send to Agent</b>.</li>
+      <li>A queued card collapses and stays collapsed after reloads, so you can tell what you've already answered. Your half-typed answers survive reloads too.</li>
+      <li>Once firstmate has acted on an answer, its card moves to <b>Firstmate has these</b> at the bottom.</li>
+    </ul>
+    <p class="text-xs opacity-60">Last changed {{LAST_CHANGED}}</p>
+  </header>
+
+  <p class="text-center opacity-70 py-6" id="empty">Nothing waiting on you right now.</p>
+
+  <!-- ASK CARDS: append new cards here, above the received list, in id order. Card skeleton (copy, then fill every {{...}}):
+  <section class="card bg-base-100 shadow" data-ask="q{{N}}"><div class="card-body gap-2">
+    <div class="flex gap-2 items-center"><span class="badge badge-primary">Q{{N}}</span><span class="text-xs opacity-60">asked {{TIME}}</span><span class="badge badge-outline badge-sm">{{short tag, e.g. push needs your OK}}</span></div>
+    <h2 class="card-title">{{the question, one line}}</h2>
+    <div class="queuedbox alert alert-success text-sm"><span>Queued: <b class="qtext"></b>. If you haven't already, press <b>Send to Agent</b>. <button type="button" class="btn btn-xs ml-2 reopen">Change answer</button></span></div>
+    <form class="askbody" data-lavish-question="{{stable-slug}}" data-title="Q{{N}} {{short title}}">
+      <dl class="text-sm">
+        <dt>What it is</dt><dd>{{plain-words context}}</dd>
+        <dt>Why it matters</dt><dd>{{consequence of each outcome}}</dd>
+        <dt>What each option does</dt><dd>{{one line per option}}</dd>
+        <dt>Why I recommend it</dt><dd>{{reason}}</dd>
+      </dl>
+      <div class="flex flex-col gap-1 mt-2">
+        <label class="flex gap-2"><input type="radio" class="radio radio-sm" name="choice" value="{{option text}}"> {{option}} <span class="badge badge-success badge-sm">recommended</span></label>
+      </div>
+      <textarea name="note" class="textarea textarea-sm w-full mt-2" placeholder="Comment (can be sent on its own)"></textarea>
+      <button class="btn btn-primary btn-sm mt-2" type="submit">Queue answer</button>
+      <span class="status text-sm ml-2"></span>
+    </form>
+  </div></section>
+  -->
+
+  <section class="card bg-base-300 shadow-none"><div class="card-body gap-1">
+    <h2 class="font-bold">Firstmate has these (already acted on)</h2>
+    <ul class="text-sm opacity-80 list-disc ml-5" id="received">
+      <!-- received items: newest first, e.g. <li>Q1 short topic -> what firstmate did</li> -->
+    </ul>
+  </div></section>
+</main>
+<script>
+const LS = 'fm-captain-asks-v1';
+document.getElementById('empty').hidden = !!document.querySelector('form[data-lavish-question]');
+const load = () => { try { return JSON.parse(localStorage.getItem(LS)) || {}; } catch { return {}; } };
+const save = (st) => localStorage.setItem(LS, JSON.stringify(st));
+for (const form of document.querySelectorAll('form[data-lavish-question]')) {
+  const key = form.dataset.lavishQuestion, title = form.dataset.title, card = form.closest('.card');
+  const st0 = load()[key] || {};
+  if (st0.draft) {
+    for (const [k, v] of Object.entries(st0.draft)) {
+      const radios = form.querySelectorAll(`input[type=radio][name="${CSS.escape(k)}"]`);
+      if (radios.length) { for (const r of radios) r.checked = r.value === v; continue; }
+      const el = form.querySelector(`[name="${CSS.escape(k)}"]`);
+      if (el) el.value = v;
+    }
+  }
+  if (st0.queued) { card.classList.add('is-queued'); card.querySelector('.qtext').textContent = st0.queued; }
+  form.addEventListener('input', () => {
+    const st = load(); const fd = new FormData(form); const draft = {};
+    for (const [k, v] of fd.entries()) draft[k] = v;
+    st[key] = Object.assign(st[key] || {}, { draft }); save(st);
+    form.querySelector('.status').textContent = '';
+  });
+  card.querySelector('.reopen').addEventListener('click', () => {
+    card.classList.remove('is-queued');
+    const st = load(); if (st[key]) { delete st[key].queued; save(st); }
+  });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const fd = new FormData(form), answers = {};
+    for (const [k, v] of fd.entries()) if (k !== 'note' && v) answers[k] = v;
+    const note = (fd.get('note') || '').trim();
+    if (!Object.keys(answers).length && !note) { form.querySelector('.status').textContent = 'Pick an option or write a comment first.'; return; }
+    const summary = Object.keys(answers).length ? Object.values(answers).join('; ') : '(comment only)';
+    const text = 'Captain answer [' + key + '] ' + title + ': ' + summary + (note ? ' | comment: ' + note : '');
+    if (window.lavish && window.lavish.queuePrompt) {
+      window.lavish.queuePrompt(text, { tag: 'choice', text: title + ': ' + summary + (note ? ' | comment: ' + note : ''), element: form, queueKey: key, data: { question: key, answers, note } });
+      const st = load(); st[key] = Object.assign(st[key] || {}, { queued: summary + (note ? ' + comment' : '') }); save(st);
+      card.classList.add('is-queued'); card.querySelector('.qtext').textContent = st[key].queued;
+    } else {
+      form.querySelector('.status').textContent = 'Lavish is not connected. Paste this in chat: ' + text;
+    }
+  });
+}
+</script>
+</body>
+</html>
