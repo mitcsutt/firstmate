@@ -377,6 +377,28 @@ EOF
   pass "main_inventory discloses orphan/unstructured and clears when inventory is consistent"
 }
 
+test_unindented_note_after_resolved_row_is_body() {
+  local home fakebin out
+  home=$(make_home main-unindented-body)
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [x] folded-row - Folded into another task (2026-10-22)
+Dispatched earlier; this note continues the row above without indentation.
+- [ ] queued-ship - Structured queued (repo: alpha) (kind: ship)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .main_inventory.valid == true
+      and .main_inventory.unstructured_current_count == 0
+      and ([.backlog.records[] | select(.structured | not)] | length) == 0
+      and ([.backlog.records[] | select(.id == "folded-row")][0].body_lines | length) == 1
+  ' >/dev/null || fail "unindented line after a row was not treated as its body: $out"
+  pass "an unindented line after a structured row keeps the inventory valid when it follows a resolved row"
+}
+
 test_normalized_roles_and_plural_blocker_readiness() {
   local home fakebin out
   home=$(make_home normalized-records)
@@ -1159,6 +1181,7 @@ fm_test_run \
   test_undated_captain_hold_phrasing_and_aging \
   test_hold_buckets_are_total_and_text_blind \
   test_main_inventory_orphan_and_unstructured_disclosure \
+  test_unindented_note_after_resolved_row_is_body \
   test_normalized_roles_and_plural_blocker_readiness \
   test_event_hints_follow_reconciled_current_state \
   test_open_decision_survives_later_unrelated_event \

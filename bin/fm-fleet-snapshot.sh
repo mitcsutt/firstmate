@@ -16,8 +16,10 @@
 #   roots: resolved root/config/data/state/projects directories.
 #   backlog: {path,present,records[]} where records are ordered as written in
 #     data/backlog.md and cover In flight, Queued, and Done.
-#     Canonical tasks-axi rows are structured; free-form non-empty lines in
-#     those sections are preserved as unstructured records.
+#     Canonical tasks-axi rows are structured; an indented line after one, or
+#     any line after a checked (resolved) row in the same section, is that
+#     row's body. Other free-form non-empty lines in those sections are
+#     preserved as unstructured records.
 #     Structured rows preserve captain-hold metadata such as hold_kind,
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
@@ -531,7 +533,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
        elif structured_row($line) then
          .order += 1
          | .records += [parse_row($line; .section; .order)]
-       elif ((.records | length) > 0 and (.records[-1].structured == true) and ($line | test("^[[:space:]]+"))) then
+       elif ((.records | length) > 0 and (.records[-1].structured == true) and (($line | test("^[[:space:]]+")) or (.records[-1].checked and .records[-1].state == .section))) then
          ($line | trim) as $body
          | if $body == "" then .
            else .records[-1].body_lines += [$body] end
