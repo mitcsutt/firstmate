@@ -22,7 +22,8 @@
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
-#     [--waiting-on <who> | --needs-you] [--option <label>]... [--recommend <n>] [--trail <line>]...
+#     [--waiting-on <who> | --needs-you] [--option <label>]... [--recommend <n>] [--trail <line>]... \
+#     [--input <fm-input line>]
 #   fm-captain-hold.sh holds
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh pr-policy <task-id> <PR-url> <merged|closed|terminal> <close|release>
@@ -57,6 +58,15 @@
 # `complete` and `verify` check. The reason may hold parentheses and line breaks:
 # tasks-axi refuses them, so `hold` escapes them where it writes the reason and
 # readers decode them (bin/fm-hold-reason-lib.sh owns the encoding).
+# `--input` validates a typed-answer line at hold time and appends it as the
+# reason's last line, so a malformed one is refused here instead of falling back
+# to free text in a captain view. It takes the line with or without its leading
+# `fm-input:`. The grammar is `<type> | id=label ... | rec=<id>[,<id>] |
+# until=YYYY-MM-DD | cmd=<rest of line>` with type one of approve, yesno,
+# choice, multi, text, command or snooze. choice and multi need two options and
+# every rec must name one (yesno takes yes or no), command needs a cmd (taken
+# to the end of the line, so it may hold `|`), and until must be a date. A
+# reason that already ends in an `fm-input:` line is refused.
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
@@ -363,6 +373,85 @@ validate_slug() {  # <label> <value>
   case "$value" in
     ''|*[!A-Za-z0-9._-]*) fail "$label must be a non-empty privacy-safe slug: $value" ;;
   esac
+}
+
+# Validate one typed-answer line and print it normalized as `fm-input: ...`.
+validate_input_line() {  # <line>
+  local line=$1 rest type part key val opts='' recs='' id n=0 r seen
+  case "$line" in
+    *$'\n'*|*$'\r'*) fail "--input must be a single line" ;;
+  esac
+  line=${line#"${line%%[![:space:]]*}"}
+  line=${line%"${line##*[![:space:]]}"}
+  case "$line" in fm-input:*) line=${line#fm-input:} ;; esac
+  rest=${line#"${line%%[![:space:]]*}"}
+  [ -n "$rest" ] || fail "--input is empty"
+  type=${rest%%|*}
+  type=${type%"${type##*[![:space:]]}"}
+  case "$type" in
+    approve|yesno|choice|multi|text|command|snooze) : ;;
+    *) fail "--input type must be approve, yesno, choice, multi, text, command or snooze: $type" ;;
+  esac
+  case "$rest" in *'|'*) rest=${rest#*|} ;; *) rest='' ;; esac
+  local cmd_seen=0
+  while [ -n "$rest" ]; do
+    part=${rest%%|*}
+    case "$rest" in *'|'*) rest=${rest#*|} ;; *) rest='' ;; esac
+    part=${part#"${part%%[![:space:]]*}"}
+    case "$part" in
+      cmd=*)
+        # cmd runs to the end of the line, pipes included.
+        val=${part#cmd=}
+        [ -z "$rest" ] || val="$val|$rest"
+        rest=''
+        val=${val%"${val##*[![:space:]]}"}
+        [ -n "$val" ] || fail "--input cmd= must not be empty"
+        cmd_seen=1
+        ;;
+      *)
+        part=${part%"${part##*[![:space:]]}"}
+        [ -n "$part" ] || fail "--input has an empty part"
+        key=${part%%=*}
+        val=${part#*=}
+        [ "$key" != "$part" ] || fail "--input part must be key=value: $part"
+        [ -n "$val" ] || fail "--input part has no value: $part"
+        case "$key" in
+          rec) recs=$val ;;
+          until)
+            case "$val" in
+              [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
+              *) fail "--input until= must be a YYYY-MM-DD date: $val" ;;
+            esac
+            ;;
+          *[!A-Za-z0-9_-]*) fail "--input option id must be a slug: $key" ;;
+          *)
+            case " $opts " in *" $key "*) fail "--input repeats option id: $key" ;; esac
+            opts="$opts $key"
+            n=$((n + 1))
+            ;;
+        esac
+        ;;
+    esac
+  done
+  case "$type" in
+    command) [ "$cmd_seen" -eq 1 ] || fail "--input command needs a cmd= part" ;;
+    choice|multi) [ "$n" -ge 2 ] || fail "--input $type needs at least two id=label options" ;;
+  esac
+  if [ -n "$recs" ]; then
+    case "$type" in
+      choice|multi)
+        [ "$type" = multi ] || case "$recs" in *,*) fail "--input choice rec= names one option: $recs" ;; esac
+        for r in $(printf '%s' "$recs" | tr ',' ' '); do
+          case " $opts " in *" $r "*) : ;; *) fail "--input rec= names no option: $r" ;; esac
+        done
+        ;;
+      yesno)
+        case "$recs" in yes|no) : ;; *) fail "--input yesno rec= must be yes or no: $recs" ;; esac
+        ;;
+    esac
+  fi
+  seen=${line#"${line%%[![:space:]]*}"}
+  printf 'fm-input: %s' "$seen"
 }
 
 validate_one_line() {  # <label> <value>
@@ -1239,6 +1328,7 @@ command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason original_body='' hold_status=0
   local waiting_on='' needs_you=0 options='' option_count=0 recommend='' trail='' line
+  local input='' input_set=0 last_line
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1264,6 +1354,7 @@ command_hold() {
         validate_one_line trail "$line"
         trail="${trail:+$trail$'\n'}$line"
         ;;
+      --input) shift; input=${1:-}; input_set=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -1283,6 +1374,15 @@ command_hold() {
   if { [ -n "$waiting_on" ] || [ "$needs_you" = 1 ] || [ -n "$options" ] || [ -n "$trail" ]; } \
     && ! command -v jq >/dev/null 2>&1; then
     fail "jq is required to record hold state or card detail"
+  fi
+  if [ "$input_set" -eq 1 ]; then
+    input=$(validate_input_line "$input") || exit $?
+    last_line=$(printf '%s\n' "$reason" | awk 'NF { l = $0 } END { print l }')
+    case "$last_line" in
+      fm-input:*) fail "reason already ends with an fm-input: line" ;;
+    esac
+    reason=$(printf '%s' "$reason" | awk '{ a[NR] = $0 } END { n = NR; while (n > 0 && a[n] !~ /[^[:space:]]/) n--; for (i = 1; i <= n; i++) print a[i] }')
+    reason="$reason"$'\n'"$input"
   fi
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"

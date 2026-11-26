@@ -2602,7 +2602,58 @@ SH
   pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
 
+# --input validates the typed-answer grammar at hold time and appends the line
+# as the reason's last line; a malformed line is refused before anything is held.
+test_hold_input_validates_and_appends_the_input_line() {
+  local home out shown line bad
+  home=$(make_home hold-input)
+  run_captain "$home" hold sample-input-call --title 'Pick a route' --repo sample \
+    --reason $'Which route?\n\n' --input 'choice | a=North | b=South | rec=a' >/dev/null \
+    || fail "hold refused a valid choice input"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" show sample-input-call) \
+    || fail "could not show the held call"
+  shown=$(printf '%s\n' "$out" | sed -n 's/^  hold_reason: //p')
+  printf '%s\n' "$shown" | jq -e '. == "Which route?\nfm-input: choice | a=North | b=South | rec=a"' >/dev/null \
+    || fail "the reason did not end with the normalized input line: $shown"
+
+  run_captain "$home" hold sample-input-cmd --title 'Run it' --repo sample \
+    --reason 'Run this' --input 'fm-input: command | cmd=gh auth status | cat' >/dev/null \
+    || fail "hold refused a valid command input"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" show sample-input-cmd)
+  shown=$(printf '%s\n' "$out" | sed -n 's/^  hold_reason: //p')
+  printf '%s\n' "$shown" | jq -e '. == "Run this\nfm-input: command | cmd=gh auth status | cat"' >/dev/null \
+    || fail "a pipe inside cmd= was not kept: $shown"
+
+  for line in 'yesno | rec=no' 'approve' 'text' 'snooze | until=2099-01-31' \
+    'multi | a=One | b=Two | rec=a,b'; do
+    run_captain "$home" hold sample-input-ok --title 'Ok' --repo sample \
+      --reason 'Question' --input "$line" >/dev/null \
+      || fail "hold refused the valid input: $line"
+  done
+
+  for bad in 'bogus | a=A' 'choice | a=Only' 'choice | a=A | b=B | rec=c' \
+    'choice | a=A | b=B | rec=a,b' 'yesno | rec=maybe' 'command' 'command | cmd=' \
+    'snooze | until=tomorrow' 'choice | a=A | a=B' 'choice | a=A | b' ''; do
+    if run_captain "$home" hold sample-input-bad --title 'Bad' --repo sample \
+      --reason 'Question' --input "$bad" >/dev/null 2>&1; then
+      fail "hold accepted the malformed input: '$bad'"
+    fi
+  done
+  if run_captain "$home" hold sample-input-bad --title 'Bad' --repo sample \
+    --reason $'Question\nline two' --input $'yesno\nrec=no' >/dev/null 2>&1; then
+    fail "hold accepted a multi-line input"
+  fi
+  if run_captain "$home" hold sample-input-bad --title 'Bad' --repo sample \
+    --reason $'Question\nfm-input: yesno' --input 'yesno' >/dev/null 2>&1; then
+    fail "hold accepted an input on a reason that already ends in one"
+  fi
+  tasks_in "$home" show sample-input-bad >/dev/null 2>&1 \
+    && fail "a refused input still created the task"
+  pass "hold --input validates the grammar, appends the line, and refuses a malformed one before holding"
+}
+
 test_hold_reason_round_trips_awkward_characters
+test_hold_input_validates_and_appends_the_input_line
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
