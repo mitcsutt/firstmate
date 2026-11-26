@@ -146,9 +146,32 @@ fm_parent_channel_outbound_status() {  # <home> <state>
 }
 
 # Fold <text> onto one bounded line, so a note copied from a child ledger or a
-# hold reason cannot break the channel's line framing.
+# hold reason cannot break the channel's line framing. A trailing `fm-input:`
+# segment (the typed-answer line a hold reason ends with) survives the cut: the
+# head is shortened instead, so a long ask never loses its answer inputs.
 fm_parent_channel_clean_note() {  # <text>
-  printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
+  local LC_ALL=C folded head seg room limit=1200
+  folded=$(printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ')
+  if [ "${#folded}" -le "$limit" ]; then
+    printf '%s' "$folded"
+    return 0
+  fi
+  case "$folded" in
+    *' fm-input:'*)
+      seg="fm-input:${folded##* fm-input:}"
+      head=${folded%" $seg"}
+      if [ "${#seg}" -le "$limit" ]; then
+        room=$((limit - ${#seg} - 1))
+        if [ "$room" -lt 1 ]; then
+          printf '%s' "$seg"
+        else
+          printf '%s %s' "$(printf '%s' "$head" | LC_ALL=C cut -c1-"$room")" "$seg"
+        fi
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s' "$folded" | LC_ALL=C cut -c1-"$limit"
 }
 
 # Append <line> once, using fm-classify-lib.sh's retry contract. Time-insensitive:
